@@ -1,3 +1,5 @@
-__pycache__/
+"__pycache__/
 *.pyc
 .env
+downloads/
+data/pdfs/" | Out-File -Encoding utf8 .gitignore
