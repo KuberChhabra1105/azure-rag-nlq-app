@@ -18,7 +18,7 @@ HTML_PAGE = """
     </style>
 </head>
 <body>
-    <h2>Ask about Physics, Science, or Employee Data</h2>
+    <h2>Ask Here...</h2>
     <input type="text" id="question" placeholder="Type your question here">
     <button onclick="askQuestion()">Ask</button>
     <div id="loading">Thinking...</div>
