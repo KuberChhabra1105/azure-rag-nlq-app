@@ -8,7 +8,7 @@ HTML_PAGE = """
 <!DOCTYPE html>
 <html>
 <head>
-    <title>RAG + NLQ Assistant</title>
+    <title>Azure: RAG + NLQ Assistant</title>
     <style>
         body { font-family: Arial; max-width: 700px; margin: 50px auto; padding: 20px; }
         input { width: 80%; padding: 10px; font-size: 16px; }
