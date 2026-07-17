@@ -106,7 +106,7 @@ def query_database(query):
     sql_response = client.chat.completions.create(
         model=AZURE_CHAT_DEPLOYMENT,
         messages=[
-            {"role": "system", "content": f"Write a PostgreSQL SQL query for this question. Only use these tables and columns. Return ONLY the SQL, no explanation.\n{schema_text}"},
+            {"role": "system", "content": "You are a helpful assistant with access to tools that retrieve real, specific information. Before answering, always consider whether calling one or more tools would give a more accurate, specific answer than relying on your own general knowledge. Prefer using tools whenever the question could be answered with real retrieved data, even if the question also seems answerable generally. Only skip tools if the question is truly unrelated to anything the tools could look up, such as basic math or greetings."},
             {"role": "user", "content": query}
         ],
         max_completion_tokens=2000
