@@ -128,14 +128,13 @@ def query_database(query):
         nlq_conn.rollback()
         return f"Database error: {e}"
 
-
-# tools gpt can choose to call on its own, no forced keywords
+# tools gpt can choose to call on its own
 tools = [
     {
         "type": "function",
         "function": {
             "name": "search_textbook",
-            "description": "Performs a semantic search over a collection of documents to find relevant passages that can help answer conceptual or explanatory questions.",
+            "description": "Searches physics and science textbook documents to find real passages relevant to a conceptual or explanatory question. Always use this for any question that could be explained using textbook knowledge.",
             "parameters": {
                 "type": "object",
                 "properties": {"query": {"type": "string", "description": "the search text"}},
@@ -147,7 +146,7 @@ tools = [
         "type": "function",
         "function": {
             "name": "query_database",
-            "description": "Runs a query against a structured business database to retrieve exact facts, numbers, or records.",
+            "description": "Runs a real SQL query against a live business database containing employees, departments, projects, customers, orders, products, and payments. Always use this for any question about specific records, counts, amounts, names, or comparisons involving this kind of data, even if the question does not name the exact company or dataset.",
             "parameters": {
                 "type": "object",
                 "properties": {"query": {"type": "string", "description": "the question needing a database lookup"}},
@@ -157,11 +156,21 @@ tools = [
     }
 ]
 
+SYSTEM_INSTRUCTIONS = """
+You are a capable research assistant who always prefers checking real, available information over guessing or asking questions.
+
+You have direct access to a textbook knowledge base and a live business database. Whenever a question touches on either kind of information, your instinct is to go look it up yourself using your tools, and then answer based on what you actually found, the same way a competent analyst would rather pull up the real data than ask the person to clarify something you can just go check.
+
+You never respond with clarifying questions or a list of possible interpretations, because you always have the option to investigate first. If your tools return nothing useful, you say so plainly and briefly, rather than guessing or listing hypothetical answers.
+
+You answer like someone confident and efficient: short, direct, and complete, without offering extra menus of what you could do next unless the person asks for more.
+"""
+
 
 def ask(question):
-    # let gpt decide on its own which tool or tools to call
+    # let gpt decide on its own which tool or tools to call, but never ask the user anything back
     messages = [
-        {"role": "system", "content": "You are a helpful assistant. Decide for yourself, based on the question, whether you need to call any tools, one tool, or multiple tools, to gather information before answering. Only call a tool if it is actually needed."},
+        {"role": "system", "content": SYSTEM_INSTRUCTIONS},
         {"role": "user", "content": question}
     ]
 
@@ -202,7 +211,6 @@ def ask(question):
     )
 
     return final_response.choices[0].message.content
-
 
 if __name__ == "__main__":
     while True:
