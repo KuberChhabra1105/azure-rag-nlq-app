@@ -28,16 +28,25 @@ nlq_conn = psycopg2.connect(host=DB_HOST, port=DB_PORT, dbname=NLQ_DB_NAME, user
 nlq_cur = nlq_conn.cursor()
 
 
+import time
+
 def reconnect_if_needed(conn, cur, dbname):
-    # check if connection alive, else reconnect
+    # check if connection alive, else reconnect, retrying a few times if needed
     try:
         cur.execute("SELECT 1")
         return conn, cur
     except:
-        print("Reconnecting to", dbname)
-        conn = psycopg2.connect(host=DB_HOST, port=DB_PORT, dbname=dbname, user=DB_USER, password=DB_PASSWORD, sslmode="require", connect_timeout=30)
-        cur = conn.cursor()
-        return conn, cur
+        for attempt in range(3):
+            try:
+                print("Reconnecting to", dbname, "attempt", attempt + 1)
+                conn = psycopg2.connect(host=DB_HOST, port=DB_PORT, dbname=dbname, user=DB_USER, password=DB_PASSWORD, sslmode="require", connect_timeout=30)
+                cur = conn.cursor()
+                return conn, cur
+            except Exception as e:
+                print("Reconnect attempt failed:", e)
+                time.sleep(2)
+
+        raise Exception(f"Could not reconnect to {dbname} after 3 attempts")
 
 
 def get_embedding(text):
@@ -106,13 +115,29 @@ def query_database(query):
     sql_response = client.chat.completions.create(
         model=AZURE_CHAT_DEPLOYMENT,
         messages=[
-            {"role": "system", "content": "You are a helpful assistant with access to tools that retrieve real, specific information. Before answering, always consider whether calling one or more tools would give a more accurate, specific answer than relying on your own general knowledge. Prefer using tools whenever the question could be answered with real retrieved data, even if the question also seems answerable generally. Only skip tools if the question is truly unrelated to anything the tools could look up, such as basic math or greetings."},
+            {"role": "system", "content": f"""You are a PostgreSQL expert. Given a database schema and a question, write ONE valid PostgreSQL SELECT query that answers it.
+
+Database schema:
+{schema_text}
+
+Rules:
+- Return ONLY the raw SQL query, nothing else.
+- Do not wrap it in markdown code fences (no ```sql or ```).
+- Do not add any explanation before or after the query.
+- Use only the table and column names given in the schema above.
+- Only generate SELECT queries, never INSERT/UPDATE/DELETE/DROP."""},
             {"role": "user", "content": query}
         ],
         max_completion_tokens=2000
     )
 
     sql = sql_response.choices[0].message.content.strip()
+
+    # in case model still wraps it in code fences despite instructions, strip them
+    if sql.startswith("```"):
+        sql = sql.strip("`")
+        if sql.lower().startswith("sql"):
+            sql = sql[3:].strip()
 
     nlq_conn, nlq_cur = reconnect_if_needed(nlq_conn, nlq_cur, NLQ_DB_NAME)
 
@@ -159,9 +184,11 @@ tools = [
 SYSTEM_INSTRUCTIONS = """
 You are a capable research assistant who always prefers checking real, available information over guessing or asking questions.
 
-You have direct access to a textbook knowledge base and a live business database. Whenever a question touches on either kind of information, your instinct is to go look it up yourself using your tools, and then answer based on what you actually found, the same way a competent analyst would rather pull up the real data than ask the person to clarify something you can just go check.
+You have direct access to a textbook knowledge base and a live business database. Whenever a question touches on either kind of information, your instinct is to go look it up yourself using your real tools, and then answer based on what you actually found, the same way a competent analyst would rather pull up the real data than ask the person to clarify something you can just go check.
 
-You never respond with clarifying questions or a list of possible interpretations, because you always have the option to investigate first. If your tools return nothing useful, you say so plainly and briefly, rather than guessing or listing hypothetical answers.
+You must only use information that comes back from an actual tool call. Never write out example, illustrative, or placeholder data as if it were a real result. Never narrate a tool being called in plain text. If you are going to look something up, actually call the tool through the proper mechanism rather than describing or simulating that call in your written answer.
+
+You never respond with clarifying questions or a list of possible interpretations, because you always have the option to investigate first. If your tools return nothing useful, you say so plainly and briefly, rather than guessing or fabricating an answer.
 
 You answer like someone confident and efficient: short, direct, and complete, without offering extra menus of what you could do next unless the person asks for more.
 """
@@ -183,10 +210,47 @@ def ask(question):
 
     reply = response.choices[0].message
 
-    # if gpt did not call any tool, just return its direct answer
-    if not reply.tool_calls:
-        return reply.content
+    # keep retrying if gpt fakes a tool call as plain text instead of really calling it
+    attempts = 0
 
+    while not reply.tool_calls and attempts < 3:
+
+        content_check = reply.content.strip() if reply.content else ""
+
+        # if this really looks like a genuine plain answer with no fake call signs, trust it
+        looks_like_narration = (
+            content_check.startswith("{")
+            or '"query":' in content_check
+            or "function" in content_check.lower()
+            or "calling" in content_check.lower()
+            or len(content_check) < 150
+        )
+
+        if not looks_like_narration:
+            return reply.content
+
+        attempts += 1
+
+        messages.append({"role": "user", "content": "Stop describing tool calls in text. Call a real tool right now."})
+
+        # force gpt to structurally call a real tool, no plain text allowed this time
+        retry_response = client.chat.completions.create(
+            model=AZURE_CHAT_DEPLOYMENT,
+            messages=messages,
+            tools=tools,
+            tool_choice="required",
+            max_completion_tokens=2000
+        )
+
+        reply = retry_response.choices[0].message
+
+        print("DEBUG attempt", attempts, "finish_reason:", retry_response.choices[0].finish_reason)
+        print("DEBUG attempt", attempts, "tool_calls:", reply.tool_calls)
+        print("DEBUG attempt", attempts, "content:", reply.content)
+
+    # if gpt never made a real tool call after retries, be honest instead of showing fake data
+    if not reply.tool_calls:
+        return "I was not able to retrieve reliable data for this question just now. Please try asking again."
     messages.append(reply)
 
     # run whichever tools gpt decided to call
@@ -204,13 +268,39 @@ def ask(question):
         messages.append({"role": "tool", "tool_call_id": call.id, "content": result})
 
     # ask gpt again, now with tool results, to write final answer
-    final_response = client.chat.completions.create(
-        model=AZURE_CHAT_DEPLOYMENT,
-        messages=messages,
-        max_completion_tokens=2000
-    )
+    final_attempts = 0
+    final_answer = None
 
-    return final_response.choices[0].message.content
+    while final_attempts < 3:
+
+        final_response = client.chat.completions.create(
+            model=AZURE_CHAT_DEPLOYMENT,
+            messages=messages,
+            max_completion_tokens=2000
+        )
+
+        final_answer = final_response.choices[0].message.content
+        check = final_answer.strip() if final_answer else ""
+
+        print("DEBUG final_attempt", final_attempts, "finish_reason:", final_response.choices[0].finish_reason)
+        print("DEBUG final_attempt", final_attempts, "content:", check[:300])
+
+        looks_broken = (
+            check.startswith("{")
+            or check.startswith("(to=")
+            or "functions." in check
+            or "to=functions" in check
+            or '"query":' in check
+            or "SELECT " in check.upper()
+        )
+        if not looks_broken:
+            return final_answer
+
+        final_attempts += 1
+        messages.append({"role": "assistant", "content": final_answer})
+        messages.append({"role": "user", "content": "Your last reply contained broken internal formatting instead of a clean answer. Write a plain, clean, final answer in normal sentences only, using the data already retrieved."})
+
+    return "I retrieved the data but had trouble formatting a clean answer. Please try asking again."
 
 if __name__ == "__main__":
     while True:
